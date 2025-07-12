@@ -7,7 +7,7 @@ else
 	ifeq ($(UNAME_S),Darwin)
 		LDFLAGS = -framework Cocoa -framework AudioToolbox
 	else
-		LDFLAGS = -lX11 -lasound
+		LDFLAGS = -lxcb -lxcb-image -lxcb-util -lxcb-keysyms -lXau -lXdmcp -lasound
 	endif
 endif
 
