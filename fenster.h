@@ -8,10 +8,16 @@
 #elif defined(_WIN32)
 #include <windows.h>
 #else
-#define _DEFAULT_SOURCE 1
-#include <X11/XKBlib.h>
-#include <X11/Xlib.h>
-#include <X11/keysym.h>
+#include <xcb/xcb.h>
+#include <xcb/xcb_image.h>
+#include <xcb/xproto.h>
+#include <xcb/xcb_keysyms.h>
+#include <xcb/xcb_atom.h> // needed for window closing support
+// NOTE: the following is enough for the tiny subset used, instead of the full X11/keysymdef.h
+#define XK_LATIN1
+#define XK_MISCELLANY
+#include <X11/keysymdef.h>
+
 #include <time.h>
 #endif
 
@@ -33,10 +39,13 @@ struct fenster {
 #elif defined(_WIN32)
   HWND hwnd;
 #else
-  Display *dpy;
-  Window w;
-  GC gc;
-  XImage *img;
+  xcb_connection_t* xcb_connection;
+  xcb_drawable_t xcb_window;
+  xcb_gcontext_t xcb_gc;
+  xcb_image_t* xcb_image;
+  xcb_pixmap_t xcb_pixmap;
+  xcb_key_symbols_t* xcb_keysyms;
+  xcb_intern_atom_reply_t* xcb_atom_delete_window;
 #endif
 };
 
@@ -260,51 +269,126 @@ FENSTER_API int fenster_loop(struct fenster *f) {
 static int FENSTER_KEYCODES[124] = {XK_BackSpace,8,XK_Delete,127,XK_Down,18,XK_End,5,XK_Escape,27,XK_Home,2,XK_Insert,26,XK_Left,20,XK_Page_Down,4,XK_Page_Up,3,XK_Return,10,XK_Right,19,XK_Tab,9,XK_Up,17,XK_apostrophe,39,XK_backslash,92,XK_bracketleft,91,XK_bracketright,93,XK_comma,44,XK_equal,61,XK_grave,96,XK_minus,45,XK_period,46,XK_semicolon,59,XK_slash,47,XK_space,32,XK_a,65,XK_b,66,XK_c,67,XK_d,68,XK_e,69,XK_f,70,XK_g,71,XK_h,72,XK_i,73,XK_j,74,XK_k,75,XK_l,76,XK_m,77,XK_n,78,XK_o,79,XK_p,80,XK_q,81,XK_r,82,XK_s,83,XK_t,84,XK_u,85,XK_v,86,XK_w,87,XK_x,88,XK_y,89,XK_z,90,XK_0,48,XK_1,49,XK_2,50,XK_3,51,XK_4,52,XK_5,53,XK_6,54,XK_7,55,XK_8,56,XK_9,57};
 // clang-format on
 FENSTER_API int fenster_open(struct fenster *f) {
-  f->dpy = XOpenDisplay(NULL);
-  int screen = DefaultScreen(f->dpy);
-  f->w = XCreateSimpleWindow(f->dpy, RootWindow(f->dpy, screen), 0, 0, f->width,
-                             f->height, 0, BlackPixel(f->dpy, screen),
-                             WhitePixel(f->dpy, screen));
-  f->gc = XCreateGC(f->dpy, f->w, 0, 0);
-  XSelectInput(f->dpy, f->w,
-               ExposureMask | KeyPressMask | KeyReleaseMask | ButtonPressMask |
-                   ButtonReleaseMask | PointerMotionMask);
-  XStoreName(f->dpy, f->w, f->title);
-  XMapWindow(f->dpy, f->w);
-  XSync(f->dpy, f->w);
-  f->img = XCreateImage(f->dpy, DefaultVisual(f->dpy, 0), 24, ZPixmap, 0,
-                        (char *)f->buf, f->width, f->height, 32, 0);
+  f->xcb_connection = xcb_connect(NULL, NULL);
+  xcb_connection_t* const conn = f->xcb_connection;
+  f->xcb_keysyms = xcb_key_symbols_alloc(conn);
+  xcb_screen_t* screen = xcb_setup_roots_iterator(xcb_get_setup(conn)).data;
+  f->xcb_gc = xcb_generate_id(conn);
+  uint32_t mask = XCB_GC_FOREGROUND | XCB_GC_BACKGROUND | XCB_GC_GRAPHICS_EXPOSURES;
+  uint32_t values[3] = {screen->black_pixel, screen->white_pixel, 0};
+  xcb_create_gc(conn, f->xcb_gc, screen->root, mask, values);
+  f->xcb_window = xcb_generate_id(conn);
+  mask = XCB_CW_EVENT_MASK | XCB_CW_BACK_PIXEL;
+  values[0] = screen->black_pixel;
+  values[1] = XCB_EVENT_MASK_EXPOSURE |
+    XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE |
+    XCB_EVENT_MASK_POINTER_MOTION | XCB_EVENT_MASK_BUTTON_MOTION |
+    //XCB_EVENT_MASK_ENTER_WINDOW | XCB_EVENT_MASK_LEAVE_WINDOW |
+    XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE |
+    XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+  xcb_create_window(conn,
+    XCB_COPY_FROM_PARENT,
+    f->xcb_window,
+    screen->root, 0, 0, f->width, f->height, 5 /* border_width */,
+    XCB_WINDOW_CLASS_INPUT_OUTPUT,
+    screen->root_visual,
+    mask, values);
+  // xcb required boilerplate for window closing //////////////////
+  // reference: vulkan-sdk/platform/xcb/xcb.cpp
+  xcb_intern_atom_cookie_t wm_prot_cookie = xcb_intern_atom(conn, 1, 12, "WM_PROTOCOLS");
+  xcb_intern_atom_reply_t *wm_prot_reply = xcb_intern_atom_reply(conn, wm_prot_cookie, NULL);
+  xcb_intern_atom_cookie_t wm_delwindow_cookie = xcb_intern_atom(conn, 0, 16, "WM_DELETE_WINDOW");
+  f->xcb_atom_delete_window = xcb_intern_atom_reply(conn, wm_delwindow_cookie, NULL);
+  xcb_change_property(conn, XCB_PROP_MODE_REPLACE, f->xcb_window, wm_prot_reply->atom,
+                      XCB_ATOM_ATOM, 32, 1, &f->xcb_atom_delete_window->atom);
+  free(wm_prot_reply);
+  // //////////////////////////////////////////////////////////////
+  xcb_map_window(conn, f->xcb_window);
+  xcb_flush(conn);
+  f->xcb_pixmap = xcb_generate_id(conn);
+  xcb_create_pixmap(conn, 24, f->xcb_pixmap, f->xcb_window, f->width, f->height);
+  f->xcb_image = xcb_image_create_native(conn, f->width, f->height, XCB_IMAGE_FORMAT_Z_PIXMAP,
+      24, (uint8_t*)f->buf, f->width * f->height * 4, (uint8_t*)f->buf);
+  xcb_flush(conn);
   return 0;
 }
-FENSTER_API void fenster_close(struct fenster *f) { XCloseDisplay(f->dpy); }
-FENSTER_API int fenster_loop(struct fenster *f) {
-  XEvent ev;
-  XPutImage(f->dpy, f->w, f->gc, f->img, 0, 0, 0, 0, f->width, f->height);
-  XFlush(f->dpy);
-  while (XPending(f->dpy)) {
-    XNextEvent(f->dpy, &ev);
-    switch (ev.type) {
-    case ButtonPress:
-    case ButtonRelease:
-      f->mouse = (ev.type == ButtonPress);
+FENSTER_API void fenster_close(struct fenster *f)
+{
+  free(f->xcb_atom_delete_window);
+  xcb_free_pixmap(f->xcb_connection, f->xcb_pixmap);
+  xcb_free_gc(f->xcb_connection, f->xcb_gc);
+  xcb_key_symbols_free(f->xcb_keysyms);
+  xcb_disconnect(f->xcb_connection);
+}
+static void fenster_util_xcb_key_input(struct fenster *f, xcb_keycode_t keycode_, uint16_t state)
+{
+  uint32_t is_mod_shift = (state & 1); (void)is_mod_shift;
+  uint32_t is_mod_ctrl = ((state >> 2) & 1); (void)is_mod_ctrl;
+  uint32_t is_mod_mod1 = ((state >> 3) & 1); (void)is_mod_mod1; // ALT
+  uint32_t is_mod_mod4 = ((state >> 6) & 1); (void)is_mod_mod4; // SUPER
+  f->mod = (!!(((state >> 2) & 1))) | (!!((state & 1)) << 1) |
+    (!!(((state >> 3) & 1)) << 2) | (!!(((state >> 6) & 1)) << 3);
+  int key_out = xcb_key_symbols_get_keysym(f->xcb_keysyms, keycode_, 0 /* TODO: col */);
+  for (unsigned int i = 0; i < 124; i += 2)
+  {
+    if (FENSTER_KEYCODES[i] == key_out) {
+      f->keys[FENSTER_KEYCODES[i + 1]] = 1; // TRUE
       break;
-    case MotionNotify:
-      f->x = ev.xmotion.x, f->y = ev.xmotion.y;
-      break;
-    case KeyPress:
-    case KeyRelease: {
-      int m = ev.xkey.state;
-      int k = XkbKeycodeToKeysym(f->dpy, ev.xkey.keycode, 0, 0);
-      for (unsigned int i = 0; i < 124; i += 2) {
-        if (FENSTER_KEYCODES[i] == k) {
-          f->keys[FENSTER_KEYCODES[i + 1]] = (ev.type == KeyPress);
-          break;
-        }
-      }
-      f->mod = (!!(m & ControlMask)) | (!!(m & ShiftMask) << 1) |
-               (!!(m & Mod1Mask) << 2) | (!!(m & Mod4Mask) << 3);
-    } break;
     }
+  }
+}
+FENSTER_API int fenster_loop(struct fenster *f) {
+  xcb_generic_event_t* event;
+  xcb_image_put(f->xcb_connection, f->xcb_pixmap, f->xcb_gc, f->xcb_image, 0, 0, 0);
+  xcb_copy_area(f->xcb_connection, f->xcb_pixmap, f->xcb_window, f->xcb_gc, 0, 0, 0, 0, f->width, f->height);
+  xcb_flush(f->xcb_connection);
+  while ((event = xcb_poll_for_event(f->xcb_connection)))
+  {
+    switch (event->response_type & ~0x80)
+    {
+      case XCB_BUTTON_PRESS:
+      {
+        f->mouse = 1;
+        break;
+      }
+      case XCB_BUTTON_RELEASE:
+      {
+        f->mouse = 0;
+        break;
+      }
+      case XCB_MOTION_NOTIFY:
+      {
+        xcb_motion_notify_event_t *motion = (xcb_motion_notify_event_t *)event;
+        f->x = motion->event_x;
+        f->y = motion->event_y;
+        break;
+      }
+      case XCB_KEY_PRESS:
+      {
+        xcb_key_press_event_t* kb_event = (xcb_key_press_event_t*)event;
+        fenster_util_xcb_key_input(f, kb_event->detail, kb_event->state);
+        break;
+      }
+      case XCB_KEY_RELEASE:
+      {
+        xcb_key_release_event_t* kb_event = (xcb_key_release_event_t*)event;
+        fenster_util_xcb_key_input(f, kb_event->detail, kb_event->state);
+        break;
+      }
+      case XCB_CLIENT_MESSAGE:
+      {
+        if (((xcb_client_message_event_t*)(event))->data.data32[0] == f->xcb_atom_delete_window->atom)
+        {
+          // window was closed -> quit !
+          free(event);
+          return 1;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+    free(event); // libXCB does one alloc per event
   }
   return 0;
 }
