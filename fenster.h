@@ -34,8 +34,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include <stdio.h>
-
 struct fenster {
   const char *title;
   const int width;
