@@ -7,7 +7,14 @@ else
 	ifeq ($(UNAME_S),Darwin)
 		LDFLAGS = -framework Cocoa
 	else
-		LDFLAGS = -lxcb -lxcb-image -lxcb-util -lxcb-keysyms -lXau -lXdmcp
+		# with FENSTER_XCB_USE_IMAGE 1
+		#LDFLAGS = -lxcb -lxcb-image -lxcb-shm -lxcb-util -lxcb-keysyms -lXau -lXdmcp
+		# with FENSTER_XCB_USE_IMAGE 0
+		LDFLAGS= -lxcb -lxcb-keysyms -lXau -lXdmcp
+		# partial static
+		#LDFLAGS= -Wl,-Bstatic -lxcb -lxcb-keysyms -lXau -lXdmcp -Wl,-Bdynamic -Wl,--gc-sections
+		# fully static (without TCP, getaddrinfo etc.)
+		#LDFLAGS= -static -lxcb -lxcb-keysyms -lXau -lXdmcp
 	endif
 endif
 
