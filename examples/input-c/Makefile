@@ -1,4 +1,4 @@
-CFLAGS ?= -Wall -Wextra -std=c99
+CFLAGS ?= -Wall -Wextra -std=c99 -g -Og
 
 ifeq ($(OS),Windows_NT)
 	LDFLAGS = -lgdi32
@@ -7,7 +7,7 @@ else
 	ifeq ($(UNAME_S),Darwin)
 		LDFLAGS = -framework Cocoa
 	else
-		LDFLAGS = -lX11
+		LDFLAGS = -lxcb -lxcb-keysyms -lXau -lXdmcp
 	endif
 endif
 

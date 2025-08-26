@@ -1,4 +1,4 @@
-CFLAGS+=-Wall -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE
+CFLAGS+=-Wall -DNORMALUNIX -DLINUX -DSNDSERV -D_DEFAULT_SOURCE -g -O2
 LIBS+=-lm -lc
 ifeq ($(OS),Windows_NT)
 	LIBS+= -lgdi32
@@ -7,7 +7,7 @@ else
 	ifeq ($(UNAME_S),Darwin)
 		LIBS+=-framework Cocoa
 	else
-		LIBS+=-lX11
+		LIBS+=-lxcb -lxcb-keysyms -lXau -lXdmcp
 	endif
 endif
 

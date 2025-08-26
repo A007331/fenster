@@ -1,4 +1,4 @@
-CXXFLAGS ?= -Wall -Wextra -std=c++11
+CXXFLAGS ?= -Wall -Wextra -std=c++11 -fno-rtti -fno-exceptions -g -Og
 
 ifeq ($(OS),Windows_NT)
 	LDFLAGS = -lgdi32
@@ -7,7 +7,7 @@ else
 	ifeq ($(UNAME_S),Darwin)
 		LDFLAGS = -framework Cocoa
 	else
-		LDFLAGS = -lX11
+		LDFLAGS = -lxcb -lxcb-keysyms -lXau -lXdmcp
 	endif
 endif
 

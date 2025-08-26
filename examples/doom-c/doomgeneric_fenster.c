@@ -2,6 +2,8 @@
 #include "doomgeneric.h"
 #include "doomkeys.h"
 
+#include <ctype.h>
+
 struct fenster f = {
     .width = DOOMGENERIC_RESX, .height = DOOMGENERIC_RESY, .title = "doom"};
 void DG_Init() {
