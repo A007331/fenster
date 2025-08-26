@@ -7,7 +7,7 @@ else
 	ifeq ($(UNAME_S),Darwin)
 		LDFLAGS = -framework Cocoa
 	else
-		LDFLAGS = -lxcb -lxcb-keysyms -lXau -lXdmcp
+		LDFLAGS = -lxcb -lxcb-shm -lxcb-keysyms -lXau -lXdmcp
 	endif
 endif
 

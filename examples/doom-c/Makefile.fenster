@@ -7,7 +7,7 @@ else
 	ifeq ($(UNAME_S),Darwin)
 		LIBS+=-framework Cocoa
 	else
-		LIBS+=-lxcb -lxcb-keysyms -lXau -lXdmcp
+		LIBS+=-lxcb -lxcb-shm -lxcb-keysyms -lXau -lXdmcp
 	endif
 endif
 

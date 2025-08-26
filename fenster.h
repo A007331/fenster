@@ -1,12 +1,10 @@
 #ifndef FENSTER_H
 #define FENSTER_H
 
-// configuration
-#define FENSTER_XCB_USE_IMAGE 0
-// the (trivial) apps still works without this extra pixmap and xcb_copy_area
-// -> consider removing this whole, but perhaps adding xcb_present_pixmap ? or xcb_dri2_swap_interval ?
-#define FENSTER_XCB_USE_INTERMEDIATE_PIXMAP 0
-
+#if __linux__
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#endif
 
 #if defined(__APPLE__)
 #include <CoreGraphics/CoreGraphics.h>
@@ -16,6 +14,7 @@
 #include <windows.h>
 #else
 #include <xcb/xcb.h>
+#include <xcb/shm.h>
 //#include <xcb/bigreq.h> // BigRequests extension
 #if FENSTER_XCB_USE_IMAGE
 #include <xcb/xcb_image.h>
@@ -34,11 +33,19 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+// this allows to avoid including xcb_image.h
+typedef struct xcb_shm_segment_info_tALT__
+{
+	xcb_shm_seg_t shmseg;
+	uint32_t shmid;
+	uint8_t* shmaddr;
+}xcb_shm_segment_info_tALT;
+
 struct fenster {
   const char *title;
   const int width;
   const int height;
-  uint32_t *buf;
+  uint32_t *buf; // TODO-shm: REMOVE !
   int keys[256]; /* keys are mostly ASCII, but arrows are 17..20 */
   int mod;       /* mod is 4 bits mask, ctrl=1, shift=2, alt=4, meta=8 */
   int x;
@@ -54,13 +61,9 @@ struct fenster {
   xcb_gcontext_t xcb_gc;
   xcb_key_symbols_t* xcb_keysyms;
   xcb_intern_atom_reply_t* xcb_atom_delete_window;
-#if FENSTER_XCB_USE_IMAGE
-  xcb_image_t* xcb_image;
-#if FENSTER_XCB_USE_INTERMEDIATE_PIXMAP
-  xcb_pixmap_t xcb_pixmap;
-#endif // FENSTER_XCB_USE_INTERMEDIATE_PIXMAP
-#endif // FENSTER_XCB_USE_IMAGE
+  xcb_pixmap_t xcb_pixmap_shm;
 #endif
+  xcb_shm_segment_info_tALT shminfo; // TODO: rename xcb_shminfo ?
 };
 
 #ifndef FENSTER_API
@@ -285,17 +288,6 @@ static int FENSTER_KEYCODES[124] = {XK_BackSpace,8,XK_Delete,127,XK_Down,18,XK_E
 FENSTER_API int fenster_open(struct fenster *f) {
   f->xcb_connection = xcb_connect(NULL, NULL);
   xcb_connection_t* const conn = f->xcb_connection;
-#if 0 // this is still magically done even without this code ; perhaps from xcb_put_image ?
-  xcb_big_requests_enable_cookie_t brcookie = xcb_big_requests_enable(conn);
-  xcb_big_requests_enable_reply_t* brreply = xcb_big_requests_enable_reply(conn, brcookie, NULL);
-  if (brreply)
-  {
-  	// we cannot set our own value ?? () but the result value is
-  	// given in: brreply->maximum_request_length
-  	free(brreply);
-  }
-  xcb_flush(conn);
-#endif
 #if !FENSTER_XCB_USE_IMAGE
   // TODO: Using the same base code as in xcb_image.c:find_format_by_depth(), we should ensure that we have
   //   the desired pixel format: BGRA as uint8 buffer, ARBG as uint32 buffer with R=0xFFFF0000, G=0xFF00FF00
@@ -335,33 +327,39 @@ FENSTER_API int fenster_open(struct fenster *f) {
   // //////////////////////////////////////////////////////////////
   xcb_map_window(conn, f->xcb_window);
   xcb_flush(conn);
-#if FENSTER_XCB_USE_IMAGE // depends on xcb_image
-#if FENSTER_XCB_USE_INTERMEDIATE_PIXMAP
-  f->xcb_pixmap = xcb_generate_id(conn);
-  xcb_create_pixmap(conn, 24, f->xcb_pixmap, f->xcb_window, f->width, f->height);
-#endif
-  f->xcb_image = xcb_image_create_native(conn, f->width, f->height, XCB_IMAGE_FORMAT_Z_PIXMAP,
-      24, (uint8_t*)f->buf, f->width * f->height * 4, (uint8_t*)f->buf);
-#else // same without the dependency on xcb_image
-  // nothing needed ! (the xcb_image was only storing some metadata, which we already have here (as long as height and width stay constant...)
-#endif
+
+  xcb_shm_query_version_reply_t* shmprep_reply;
+  shmprep_reply = xcb_shm_query_version_reply(conn, xcb_shm_query_version(conn), NULL);
+  //if (!shmprep_reply || !shmprep_reply->shared_pixmaps) {/*DBGLOG("ERROR first SHM init\n");*/}
+  free(shmprep_reply);
+
+  f->shminfo.shmid = shmget(IPC_PRIVATE, f->width * f->height * 4, IPC_CREAT | 0600/*0777*/);
+  f->shminfo.shmaddr = (uint8_t*)shmat(f->shminfo.shmid, 0, 0);
+  f->shminfo.shmseg = xcb_generate_id(conn);
+  xcb_shm_attach(conn, f->shminfo.shmseg, f->shminfo.shmid, 0);
+  shmctl(f->shminfo.shmid, IPC_RMID, 0);
+  uint8_t* shmdata = f->shminfo.shmaddr;
+  f->buf = (uint32_t*) shmdata;
+
+  f->xcb_pixmap_shm = xcb_generate_id(conn);
+  xcb_shm_create_pixmap(conn, f->xcb_pixmap_shm, f->xcb_window, f->width, f->height, 24, f->shminfo.shmseg, 0);
+
   xcb_flush(conn);
   return 0;
 }
 FENSTER_API void fenster_close(struct fenster *f)
 {
   free(f->xcb_atom_delete_window);
-#if FENSTER_XCB_USE_INTERMEDIATE_PIXMAP
-  xcb_free_pixmap(f->xcb_connection, f->xcb_pixmap);
-#endif
+
+  xcb_shm_detach(f->xcb_connection, f->shminfo.shmseg);
+  shmdt(f->shminfo.shmaddr);
+  xcb_free_pixmap(f->xcb_connection, f->xcb_pixmap_shm);
+
+  // TODO: xcb_destroy_window
   xcb_free_gc(f->xcb_connection, f->xcb_gc);
   xcb_key_symbols_free(f->xcb_keysyms);
   xcb_disconnect(f->xcb_connection);
 
-#if FENSTER_XCB_USE_IMAGE
-  //xcb_image_destroy(f->xcb_image); // crash on bad free because we did set "base" at init ? FIXME improve the init ?
-  free(f->xcb_image);
-#endif
   // do NOT free f->buf ; it is the client's responsibility, see Fenster C++ class below or examples
 }
 static void fenster_util_xcb_key_input(struct fenster *f, xcb_keycode_t keycode_, uint16_t state)
@@ -383,19 +381,7 @@ static void fenster_util_xcb_key_input(struct fenster *f, xcb_keycode_t keycode_
 }
 FENSTER_API int fenster_loop(struct fenster *f) {
   xcb_generic_event_t* event;
-#if FENSTER_XCB_USE_IMAGE // original, but has an extra "copy" compared to Xlib fenster !
-  #if FENSTER_XCB_USE_INTERMEDIATE_PIXMAP // old method, with an extra copy to avoid screen tearing or partial rendering
-  xcb_image_put(f->xcb_connection, f->xcb_pixmap, f->xcb_gc, f->xcb_image, 0, 0, 0);
-  xcb_copy_area(f->xcb_connection, f->xcb_pixmap, f->xcb_window, f->xcb_gc, 0, 0, 0, 0, f->width, f->height);
-  #else // skipping the intermediate pixmap (pseudo? tearing mitigation)
-  // new method, just one send, but TODO: add xcb_present_pixmap ? or something vsync
-  xcb_image_put(f->xcb_connection, f->xcb_window, f->xcb_gc, f->xcb_image, 0, 0, 0);
-  #endif // FENSTER_XCB_USE_INTERMEDIATE_PIXMAP
-#else // FENSTER_XCB_USE_IMAGE
-  xcb_put_image(f->xcb_connection, XCB_IMAGE_FORMAT_Z_PIXMAP/*f->xcb_image->format*/, f->xcb_window, f->xcb_gc,
-    f->width, f->height, 0/*top-left x*/, 0/* top-left y*/, 0/*left-pad*/,
-    24, f->width * f->height * 4, (uint8_t*)f->buf);
-#endif // FENSTER_XCB_USE_IMAGE
+  xcb_copy_area(f->xcb_connection, f->xcb_pixmap_shm, f->xcb_window, f->xcb_gc, 0, 0, 0, 0, f->width, f->height);
   // TODO: do we need xcb sync on some fence, or xcb_dri2_present_pixmap, or what ?
   xcb_flush(f->xcb_connection);
   while ((event = xcb_poll_for_event(f->xcb_connection)))
