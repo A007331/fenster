@@ -1,4 +1,4 @@
-CFLAGS ?= -Wall -Wextra -std=c99
+CFLAGS ?= -Wall -Wextra -std=c99 -g -Og
 
 ifeq ($(OS),Windows_NT)
 	LDFLAGS = -lgdi32
